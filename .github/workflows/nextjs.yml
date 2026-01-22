@@ -1,102 +1,91 @@
-# Sample workflow for building and deploying a Next.js site to GitHub Pages
-name: Deploy Next.js site to Pages
+  - name: Detect package manager
+    id: detect-package-manager
+    run: |
+      set -euo pipefail
 
-on:
-  push:
-    branches: ["main"]
-  workflow_dispatch:
+      # Helper to set outputs (use "." for repo root)
+      set_outputs() {
+        echo "manager=$1" >> "$GITHUB_OUTPUT"
+        echo "command=$2" >> "$GITHUB_OUTPUT"
+        echo "runner=$3" >> "$GITHUB_OUTPUT"
+        echo "workdir=$4" >> "$GITHUB_OUTPUT"
+      }
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+      # Prefer yarn.lock -> pnpm-lock.yaml -> package.json at repo root
+      if [ -f "${GITHUB_WORKSPACE}/yarn.lock" ]; then
+        set_outputs "yarn" "install" "yarn" "."
+        exit 0
+      fi
+      if [ -f "${GITHUB_WORKSPACE}/pnpm-lock.yaml" ]; then
+        set_outputs "pnpm" "install --frozen-lockfile" "pnpm exec" "."
+        exit 0
+      fi
+      if [ -f "${GITHUB_WORKSPACE}/package.json" ]; then
+        set_outputs "npm" "ci" "npx --no-install" "."
+        exit 0
+      fi
 
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
+      # Search recursively (first match wins)
+      found=$(find "${GITHUB_WORKSPACE}" -type f \( -name "yarn.lock" -o -name "pnpm-lock.yaml" -o -name "package.json" \) -print -quit || true)
+      if [ -n "$found" ]; then
+        if echo "$found" | grep -q "yarn.lock$"; then
+          dir="${found%/yarn.lock}"
+          workdir="."
+          [ "$dir" != "${GITHUB_WORKSPACE}" ] && workdir="${dir#${GITHUB_WORKSPACE}/}"
+          set_outputs "yarn" "install" "yarn" "$workdir"
+          exit 0
+        elif echo "$found" | grep -q "pnpm-lock.yaml$"; then
+          dir="${found%/pnpm-lock.yaml}"
+          workdir="."
+          [ "$dir" != "${GITHUB_WORKSPACE}" ] && workdir="${dir#${GITHUB_WORKSPACE}/}"
+          set_outputs "pnpm" "install --frozen-lockfile" "pnpm exec" "$workdir"
+          exit 0
+        else
+          dir="${found%/package.json}"
+          workdir="."
+          [ "$dir" != "${GITHUB_WORKSPACE}" ] && workdir="${dir#${GITHUB_WORKSPACE}/}"
+          set_outputs "npm" "ci" "npx --no-install" "$workdir"
+          exit 0
+        fi
+      fi
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Debug output to help troubleshooting
+      echo "No package manager files found. Workspace top-level listing:"
+      ls -la "${GITHUB_WORKSPACE}" || true
+      echo "Searching workspace (first 200 lines):"
+      find "${GITHUB_WORKSPACE}" -maxdepth 3 -type f -print | sed -n '1,200p' || true
 
-      - name: Detect package manager
-        id: detect-package-manager
-        run: |
-          # Check repo root
-          if [ -f "${{ github.workspace }}/yarn.lock" ]; then
-            echo "manager=yarn" >> $GITHUB_OUTPUT
-            echo "command=install" >> $GITHUB_OUTPUT
-            echo "runner=yarn" >> $GITHUB_OUTPUT
-            echo "workdir=" >> $GITHUB_OUTPUT
-            exit 0
-          elif [ -f "${{ github.workspace }}/package.json" ]; then
-            echo "manager=npm" >> $GITHUB_OUTPUT
-            echo "command=ci" >> $GITHUB_OUTPUT
-            echo "runner=npx --no-install" >> $GITHUB_OUTPUT
-            echo "workdir=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+      echo "Unable to determine package manager"
+      exit 1
 
-          # Check cybersecuriy-bio subdirectory
-          if [ -f "${{ github.workspace }}/cybersecurity-bio/yarn.lock" ]; then
-            echo "manager=yarn" >> $GITHUB_OUTPUT
-            echo "command=install" >> $GITHUB_OUTPUT
-            echo "runner=yarn" >> $GITHUB_OUTPUT
-            echo "workdir=cybersecurity-bio" >> $GITHUB_OUTPUT
-            exit 0
-          elif [ -f "${{ github.workspace }}/cybersecurity-bio/package.json" ]; then
-            echo "manager=npm" >> $GITHUB_OUTPUT
-            echo "command=ci" >> $GITHUB_OUTPUT
-            echo "runner=npx --no-install" >> $GITHUB_OUTPUT
-            echo "workdir=cybersecurity-bio" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+  - name: Setup Node
+    uses: actions/setup-node@v4
+    with:
+      node-version: "20"
+      cache: ${{ steps.detect-package-manager.outputs.manager }}
 
-          echo "Unable to determine package manager"
-          exit 1
+  - name: Setup Pages
+    uses: actions/configure-pages@v5
+    with:
+      static_site_generator: next
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: ${{ steps.detect-package-manager.outputs.manager }}
+  - name: Restore cache
+    uses: actions/cache@v4
+    with:
+      path: ${{ steps.detect-package-manager.outputs.workdir }}/.next/cache
+      key: ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml') }}-${{ hashFiles('**.[jt]s', '**.[jt]sx') }}
+      restore-keys: |
+        ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml') }}-
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-        with:
-          static_site_generator: next
+  - name: Install dependencies
+    run: ${{ steps.detect-package-manager.outputs.manager }} ${{ steps.detect-package-manager.outputs.command }}
+    working-directory: ${{ steps.detect-package-manager.outputs.workdir }}
 
-      - name: Restore cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.detect-package-manager.outputs.workdir }}/.next/cache
-          key: ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json', '**/yarn.lock') }}-${{ hashFiles('**.[jt]s', '**.[jt]sx') }}
-          restore-keys: |
-            ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json', '**/yarn.lock') }}-
+  - name: Build with Next.js
+    run: ${{ steps.detect-package-manager.outputs.runner }} next build
+    working-directory: ${{ steps.detect-package-manager.outputs.workdir }}
 
-      - name: Install dependencies
-        run: ${{ steps.detect-package-manager.outputs.manager }} ${{ steps.detect-package-manager.outputs.command }}
-        working-directory: ${{ steps.detect-package-manager.outputs.workdir }}
-
-      - name: Build with Next.js
-        run: ${{ steps.detect-package-manager.outputs.runner }} next build
-        working-directory: ${{ steps.detect-package-manager.outputs.workdir }}
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: ${{ steps.detect-package-manager.outputs.workdir }}/out
-
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+  - name: Upload artifact
+    uses: actions/upload-pages-artifact@v3
+    with:
+      path: ${{ steps.detect-package-manager.outputs.workdir }}/out
